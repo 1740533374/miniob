@@ -16,6 +16,7 @@ See the Mulan PSL v2 for more details. */
 
 #include "common/conf/ini.h"
 #include "common/lang/string.h"
+#include "common/lang/iostream.h"
 #include "common/log/log.h"
 #include "common/os/path.h"
 #include "common/os/pidfile.h"
@@ -29,7 +30,6 @@ See the Mulan PSL v2 for more details. */
 #include "storage/default/default_handler.h"
 #include "storage/trx/trx.h"
 
-using namespace std;
 using namespace common;
 
 bool *&_get_init()
@@ -136,22 +136,13 @@ int prepare_init_seda()
 
 int init_global_objects(ProcessParam *process_param, Ini &properties)
 {
-  GCTX.buffer_pool_manager_ = new BufferPoolManager();
-  BufferPoolManager::set_instance(GCTX.buffer_pool_manager_);
-
   GCTX.handler_ = new DefaultHandler();
 
-  DefaultHandler::set_default(GCTX.handler_);
-
   int ret = 0;
-  RC  rc  = TrxKit::init_global(process_param->trx_kit_name().c_str());
-  if (rc != RC::SUCCESS) {
-    LOG_ERROR("failed to init trx kit. rc=%s", strrc(rc));
-    ret = -1;
-  }
-  GCTX.trx_kit_ = TrxKit::instance();
 
-  rc = GCTX.handler_->init("miniob");
+  RC rc = GCTX.handler_->init("miniob", 
+                              process_param->trx_kit_name().c_str(),
+                              process_param->durability_mode().c_str());
   if (OB_FAIL(rc)) {
     LOG_ERROR("failed to init handler. rc=%s", strrc(rc));
     return -1;
@@ -161,18 +152,9 @@ int init_global_objects(ProcessParam *process_param, Ini &properties)
 
 int uninit_global_objects()
 {
-  // TODO use global context
-  DefaultHandler *default_handler = &DefaultHandler::get_default();
-  if (default_handler != nullptr) {
-    DefaultHandler::set_default(nullptr);
-    delete default_handler;
-  }
+  delete GCTX.handler_;
+  GCTX.handler_ = nullptr;
 
-  BufferPoolManager *bpm = &BufferPoolManager::instance();
-  if (bpm != nullptr) {
-    BufferPoolManager::set_instance(nullptr);
-    delete bpm;
-  }
   return 0;
 }
 

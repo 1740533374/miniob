@@ -15,21 +15,20 @@ See the Mulan PSL v2 for more details. */
  *      Author: Longda Feng
  */
 
-
-#include <iostream>
 #include <netinet/in.h>
 #include <unistd.h>
 
 #include "common/ini_setting.h"
 #include "common/init.h"
+#include "common/lang/iostream.h"
 #include "common/lang/string.h"
+#include "common/lang/map.h"
 #include "common/os/process.h"
 #include "common/os/signal.h"
 #include "common/log/log.h"
 #include "net/server.h"
 #include "net/server_param.h"
 
-using namespace std;
 using namespace common;
 
 #define NET "NET"
@@ -38,7 +37,7 @@ static Server *g_server = nullptr;
 
 void usage()
 {
-  cout << "Useage " << endl;
+  cout << "Usage " << endl;
   cout << "-p: server port. if not specified, the item in the config file will be used" << endl;
   cout << "-f: path of config file." << endl;
   cout << "-s: use unix socket and the argument is socket address" << endl;
@@ -46,6 +45,7 @@ void usage()
   cout << "-t: transaction model. {vacuous(default), mvcc}." << endl;
   cout << "-T: thread handling model. {one-thread-per-connection(default),java-thread-pool}." << endl;
   cout << "-n: buffer pool memory size in byte" << endl;
+  cout << "-d: durbility mode. {vacuous(default), disk}" << endl;
 }
 
 void parse_parameter(int argc, char **argv)
@@ -70,6 +70,7 @@ void parse_parameter(int argc, char **argv)
       case 't': process_param->set_trx_kit_name(optarg); break;
       case 'T': process_param->set_thread_handling_name(optarg); break;
       case 'n': process_param->set_buffer_pool_memory_size(atoi(optarg)); break;
+      case 'd': process_param->set_durability_mode("disk"); break;
       case 'h':
         usage();
         exit(0);
@@ -81,7 +82,7 @@ void parse_parameter(int argc, char **argv)
 
 Server *init_server()
 {
-  std::map<std::string, std::string> net_section = get_properties()->get(NET);
+  map<string, string> net_section = get_properties()->get(NET);
 
   ProcessParam *process_param = the_process_param();
 
@@ -89,15 +90,15 @@ Server *init_server()
   long max_connection_num = MAX_CONNECTION_NUM_DEFAULT;
   int  port               = PORT_DEFAULT;
 
-  std::map<std::string, std::string>::iterator it = net_section.find(CLIENT_ADDRESS);
+  map<string, string>::iterator it = net_section.find(CLIENT_ADDRESS);
   if (it != net_section.end()) {
-    std::string str = it->second;
+    string str = it->second;
     str_to_val(str, listen_addr);
   }
 
   it = net_section.find(MAX_CONNECTION_NUM);
   if (it != net_section.end()) {
-    std::string str = it->second;
+    string str = it->second;
     str_to_val(str, max_connection_num);
   }
 
@@ -107,7 +108,7 @@ Server *init_server()
   } else {
     it = net_section.find(PORT);
     if (it != net_section.end()) {
-      std::string str = it->second;
+      string str = it->second;
       str_to_val(str, port);
     }
   }
@@ -166,9 +167,21 @@ void quit_signal_handle(int signum)
   pthread_create(&tid, nullptr, quit_thread_func, (void *)(intptr_t)signum);
 }
 
+const char *startup_tips = R"(
+Welcome to the OceanBase database implementation course.
+
+Copyright (c) 2021 OceanBase and/or its affiliates.
+
+Learn more about OceanBase at https://github.com/oceanbase/oceanbase
+Learn more about MiniOB at https://github.com/oceanbase/miniob
+
+)";
+
 int main(int argc, char **argv)
 {
   int rc = STATUS_SUCCESS;
+
+  cout << startup_tips;
 
   set_signal_handler(quit_signal_handle);
 
@@ -176,7 +189,7 @@ int main(int argc, char **argv)
 
   rc = init(the_process_param());
   if (rc != STATUS_SUCCESS) {
-    std::cerr << "Shutdown due to failed to init!" << endl;
+    cerr << "Shutdown due to failed to init!" << endl;
     cleanup();
     return rc;
   }

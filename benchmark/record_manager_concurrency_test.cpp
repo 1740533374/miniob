@@ -15,21 +15,20 @@ See the Mulan PSL v2 for more details. */
 #include <benchmark/benchmark.h>
 #include <inttypes.h>
 #include <random>
-#include <stdexcept>
 
+#include "common/lang/stdexcept.h"
 #include "common/log/log.h"
 #include "common/math/integer_generator.h"
 #include "storage/buffer/disk_buffer_pool.h"
 #include "storage/common/condition_filter.h"
 #include "storage/record/record_manager.h"
 #include "storage/trx/vacuous_trx.h"
+#include "storage/clog/vacuous_log_handler.h"
+#include "storage/buffer/double_write_buffer.h"
 
 using namespace std;
 using namespace common;
 using namespace benchmark;
-
-once_flag         init_bpm_flag;
-BufferPoolManager bpm{512};
 
 struct Stat
 {
@@ -73,7 +72,7 @@ class BenchmarkBase : public Fixture
 public:
   BenchmarkBase() {}
 
-  virtual ~BenchmarkBase() { BufferPoolManager::set_instance(nullptr); }
+  virtual ~BenchmarkBase() {}
 
   virtual string Name() const = 0;
 
@@ -85,27 +84,28 @@ public:
       return;
     }
 
+    bpm_.init(make_unique<VacuousDoubleWriteBuffer>());
+
     string log_name        = this->Name() + ".log";
     string record_filename = this->record_filename();
     LoggerFactory::init_default(log_name.c_str(), LOG_LEVEL_INFO);
 
-    std::call_once(init_bpm_flag, []() { BufferPoolManager::set_instance(&bpm); });
-
     ::remove(record_filename.c_str());
 
-    RC rc = bpm.create_file(record_filename.c_str());
+    RC rc = bpm_.create_file(record_filename.c_str());
     if (rc != RC::SUCCESS) {
       LOG_WARN("failed to create record buffer pool file. filename=%s, rc=%s", record_filename.c_str(), strrc(rc));
       throw runtime_error("failed to create record buffer pool file.");
     }
 
-    rc = bpm.open_file(record_filename.c_str(), buffer_pool_);
+    rc = bpm_.open_file(log_handler_, record_filename.c_str(), buffer_pool_);
     if (rc != RC::SUCCESS) {
       LOG_WARN("failed to open record file. filename=%s, rc=%s", record_filename.c_str(), strrc(rc));
       throw runtime_error("failed to open record file");
     }
 
-    rc = handler_.init(buffer_pool_);
+    handler_ = new RecordFileHandler(StorageFormat::ROW_FORMAT);
+    rc       = handler_->init(*buffer_pool_, log_handler_, nullptr);
     if (rc != RC::SUCCESS) {
       LOG_WARN("failed to init record file handler. rc=%s", strrc(rc));
       throw runtime_error("failed to init record file handler");
@@ -120,8 +120,13 @@ public:
       return;
     }
 
-    handler_.close();
-    bpm.close_file(this->record_filename().c_str());
+    handler_->close();
+    delete handler_;
+    handler_ = nullptr;
+    // TODO 很怪，引入double write buffer后，必须要求先close buffer pool，再执行bpm.close_file。
+    // 以后必须修理好bpm、buffer pool、double write buffer之间的关系
+    buffer_pool_->close_file();
+    bpm_.close_file(this->record_filename().c_str());
     buffer_pool_ = nullptr;
     LOG_INFO("test %s teardown done. threads=%d, thread index=%d",
         this->Name().c_str(),
@@ -146,7 +151,7 @@ public:
 
     for (int32_t record_value : record_values) {
       record.int_fields[0]   = record_value;
-      [[maybe_unused]] RC rc = handler_.insert_record(reinterpret_cast<const char *>(&record), sizeof(record), &rid);
+      [[maybe_unused]] RC rc = handler_->insert_record(reinterpret_cast<const char *>(&record), sizeof(record), &rid);
       ASSERT(rc == RC::SUCCESS, "failed to insert record into record file. record value=%" PRIu32, record_value);
       rids.push_back(rid);
     }
@@ -168,7 +173,7 @@ public:
     TestRecord record;
     record.int_fields[0] = value;
 
-    RC rc = handler_.insert_record(reinterpret_cast<const char *>(&record), sizeof(record), &rid);
+    RC rc = handler_->insert_record(reinterpret_cast<const char *>(&record), sizeof(record), &rid);
     switch (rc) {
       case RC::SUCCESS: {
         stat.insert_success_count++;
@@ -181,7 +186,7 @@ public:
 
   void Delete(const RID &rid, Stat &stat)
   {
-    RC rc = handler_.delete_record(&rid);
+    RC rc = handler_->delete_record(&rid);
     switch (rc) {
       case RC::SUCCESS: {
         stat.delete_success_count++;
@@ -200,19 +205,18 @@ public:
     TestConditionFilter condition_filter(begin, end);
     RecordFileScanner   scanner;
     VacuousTrx          trx;
-    RC rc = scanner.open_scan(nullptr /*table*/, *buffer_pool_, &trx, true /*readonly*/, &condition_filter);
+    RC                  rc = scanner.open_scan(
+        nullptr /*table*/, *buffer_pool_, &trx, log_handler_, ReadWriteMode::READ_ONLY, &condition_filter);
     if (rc != RC::SUCCESS) {
       stat.scan_open_failed_count++;
     } else {
       Record  record;
       int32_t count = 0;
-      while (scanner.has_next()) {
-        rc = scanner.next(record);
-        ASSERT(rc == RC::SUCCESS, "failed to get record, rc=%s", strrc(rc));
+      while (OB_SUCC(rc = scanner.next(record))) {
         count++;
       }
 
-      if (rc != RC::SUCCESS) {
+      if (rc != RC::RECORD_EOF) {
         stat.scan_other_count++;
       } else if (count != (end - begin + 1)) {
         stat.mismatch_count++;
@@ -225,8 +229,10 @@ public:
   }
 
 protected:
-  DiskBufferPool   *buffer_pool_ = nullptr;
-  RecordFileHandler handler_;
+  BufferPoolManager  bpm_{512};
+  DiskBufferPool    *buffer_pool_ = nullptr;
+  RecordFileHandler *handler_;
+  VacuousLogHandler  log_handler_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

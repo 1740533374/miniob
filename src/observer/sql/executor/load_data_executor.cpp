@@ -58,48 +58,10 @@ RC insert_record_from_file(
     const FieldMeta *field = table->table_meta().field(i + sys_field_num);
 
     std::string &file_value = file_values[i];
-    if (field->type() != CHARS) {
+    if (field->type() != AttrType::CHARS) {
       common::strip(file_value);
     }
-
-    switch (field->type()) {
-      case INTS: {
-        deserialize_stream.clear();  // 清理stream的状态，防止多次解析出现异常
-        deserialize_stream.str(file_value);
-
-        int int_value;
-        deserialize_stream >> int_value;
-        if (!deserialize_stream || !deserialize_stream.eof()) {
-          errmsg << "need an integer but got '" << file_values[i] << "' (field index:" << i << ")";
-
-          rc = RC::SCHEMA_FIELD_TYPE_MISMATCH;
-        } else {
-          record_values[i].set_int(int_value);
-        }
-      }
-
-      break;
-      case FLOATS: {
-        deserialize_stream.clear();
-        deserialize_stream.str(file_value);
-
-        float float_value;
-        deserialize_stream >> float_value;
-        if (!deserialize_stream || !deserialize_stream.eof()) {
-          errmsg << "need a float number but got '" << file_values[i] << "'(field index:" << i << ")";
-          rc = RC::SCHEMA_FIELD_TYPE_MISMATCH;
-        } else {
-          record_values[i].set_float(float_value);
-        }
-      } break;
-      case CHARS: {
-        record_values[i].set_string(file_value.c_str());
-      } break;
-      default: {
-        errmsg << "Unsupported field type to loading: " << field->type();
-        rc = RC::SCHEMA_FIELD_TYPE_MISMATCH;
-      } break;
-    }
+    rc = DataType::type_instance(field->type())->set_value_from_str(record_values[i], file_value);
   }
 
   if (RC::SUCCESS == rc) {

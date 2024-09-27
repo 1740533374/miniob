@@ -18,7 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include <vector>
 #include <memory>
 
-#include "sql/parser/value.h"
+#include "common/value.h"
 
 class Expression;
 
@@ -88,9 +88,10 @@ struct ConditionSqlNode
 
 struct SelectSqlNode
 {
-  std::vector<RelAttrSqlNode>   attributes;  ///< attributes in select clause
-  std::vector<std::string>      relations;   ///< 查询的表
-  std::vector<ConditionSqlNode> conditions;  ///< 查询条件，使用AND串联起来多个条件
+  std::vector<std::unique_ptr<Expression>> expressions;  ///< 查询的表达式
+  std::vector<std::string>                 relations;    ///< 查询的表
+  std::vector<ConditionSqlNode>            conditions;   ///< 查询条件，使用AND串联起来多个条件
+  std::vector<std::unique_ptr<Expression>> group_by;     ///< group by clause
 };
 
 /**
@@ -99,9 +100,7 @@ struct SelectSqlNode
  */
 struct CalcSqlNode
 {
-  std::vector<Expression *> expressions;  ///< calc clause
-
-  ~CalcSqlNode();
+  std::vector<std::unique_ptr<Expression>> expressions;  ///< calc clause
 };
 
 /**
@@ -141,8 +140,6 @@ struct UpdateSqlNode
  * @brief 描述一个属性
  * @ingroup SQLParser
  * @details 属性，或者说字段(column, field)
- * Rel -> Relation
- * Attr -> Attribute
  */
 struct AttrInfoSqlNode
 {
@@ -158,8 +155,9 @@ struct AttrInfoSqlNode
  */
 struct CreateTableSqlNode
 {
-  std::string                  relation_name;  ///< Relation name
-  std::vector<AttrInfoSqlNode> attr_infos;     ///< attributes
+  std::string                  relation_name;   ///< Relation name
+  std::vector<AttrInfoSqlNode> attr_infos;      ///< attributes
+  std::string                  storage_format;  ///< storage format
 };
 
 /**

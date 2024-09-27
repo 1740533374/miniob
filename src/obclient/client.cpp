@@ -38,11 +38,12 @@ See the Mulan PSL v2 for more details. */
 #define MAX_MEM_BUFFER_SIZE 8192
 #define PORT_DEFAULT 6789
 
+using namespace std;
 using namespace common;
 
 #ifdef USE_READLINE
-const std::string HISTORY_FILE            = std::string(getenv("HOME")) + "/.miniob.history";
-time_t            last_history_write_time = 0;
+const string HISTORY_FILE            = string(getenv("HOME")) + "/.miniob.history";
+time_t       last_history_write_time = 0;
 
 char *my_readline(const char *prompt)
 {
@@ -145,8 +146,20 @@ int init_tcp_sock(const char *server_host, int server_port)
   return sockfd;
 }
 
+const char *startup_tips = R"(
+Welcome to the OceanBase database implementation course.
+
+Copyright (c) 2021 OceanBase and/or its affiliates.
+
+Learn more about OceanBase at https://github.com/oceanbase/oceanbase
+Learn more about MiniOB at https://github.com/oceanbase/miniob
+
+)";
+
 int main(int argc, char *argv[])
 {
+  printf("%s", startup_tips);
+
   const char  *unix_socket_path = nullptr;
   const char  *server_host      = "127.0.0.1";
   int          server_port      = PORT_DEFAULT;
@@ -179,11 +192,13 @@ int main(int argc, char *argv[])
   while ((input_command = my_readline(prompt_str)) != nullptr) {
     if (common::is_blank(input_command)) {
       free(input_command);
+      input_command = nullptr;
       continue;
     }
 
     if (is_exit_command(input_command)) {
       free(input_command);
+      input_command = nullptr;
       break;
     }
 
@@ -192,6 +207,8 @@ int main(int argc, char *argv[])
       exit(1);
     }
     free(input_command);
+    input_command = nullptr;
+
     memset(send_buf, 0, sizeof(send_buf));
 
     int len = 0;
@@ -218,6 +235,11 @@ int main(int argc, char *argv[])
       printf("Connection has been closed\n");
       break;
     }
+  }
+
+  if (input_command != nullptr) {
+    free(input_command);
+    input_command = nullptr;
   }
   close(sockfd);
 

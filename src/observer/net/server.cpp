@@ -95,9 +95,9 @@ void NetServer::accept(int fd)
     ::close(client_fd);
     return;
   }
-  std::stringstream address;
+  stringstream address;
   address << ip_addr << ":" << addr.sin_port;
-  std::string addr_str = address.str();
+  string addr_str = address.str();
 
   ret = set_non_block(client_fd);
   if (ret < 0) {
@@ -119,12 +119,14 @@ void NetServer::accept(int fd)
 
   Communicator *communicator = communicator_factory_.create(server_param_.protocol);
 
-  RC rc = communicator->init(client_fd, new Session(Session::default_session()), addr_str);
+  RC rc = communicator->init(client_fd, make_unique<Session>(Session::default_session()), addr_str);
   if (rc != RC::SUCCESS) {
     LOG_WARN("failed to init communicator. rc=%s", strrc(rc));
     delete communicator;
     return;
   }
+
+  LOG_INFO("Accepted connection from %s\n", communicator->addr());
 
   rc = thread_handler_->new_connection(communicator);
   if (OB_FAIL(rc)) {
@@ -132,8 +134,6 @@ void NetServer::accept(int fd)
     delete communicator;
     return;
   }
-
-  LOG_INFO("Accepted connection from %s\n", communicator->addr());
 }
 
 int NetServer::start()
@@ -319,7 +319,7 @@ int CliServer::serve()
 {
   CliCommunicator communicator;
 
-  RC rc = communicator.init(STDIN_FILENO, new Session(Session::default_session()), "stdin");
+  RC rc = communicator.init(STDIN_FILENO, make_unique<Session>(Session::default_session()), "stdin");
   if (OB_FAIL(rc)) {
     LOG_WARN("failed to init cli communicator. rc=%s", strrc(rc));
     return -1;

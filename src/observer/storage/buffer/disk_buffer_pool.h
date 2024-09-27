@@ -23,19 +23,25 @@ See the Mulan PSL v2 for more details. */
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
-#include <unordered_map>
+#include <optional>
 
 #include "common/lang/bitmap.h"
 #include "common/lang/lru_cache.h"
 #include "common/lang/mutex.h"
+#include "common/lang/memory.h"
+#include "common/lang/unordered_map.h"
 #include "common/mm/mem_pool.h"
 #include "common/rc.h"
 #include "common/types.h"
 #include "storage/buffer/frame.h"
 #include "storage/buffer/page.h"
+#include "storage/buffer/buffer_pool_log.h"
 
 class BufferPoolManager;
 class DiskBufferPool;
+class DoubleWriteBuffer;
+class LogHandler;
+class BufferPoolLogHandler;
 
 /**
  * @brief BufferPool 的实现
@@ -57,6 +63,7 @@ class DiskBufferPool;
  */
 struct BPFileHeader
 {
+  int32_t buffer_pool_id;   //! buffer pool id
   int32_t page_count;       //! 当前文件一共有多少个页面
   int32_t allocated_pages;  //! 已经分配了多少个页面
   char    bitmap[0];        //! 页面分配位图, 第0个页面(就是当前页面)，总是1
@@ -66,7 +73,7 @@ struct BPFileHeader
    */
   static const int MAX_PAGE_NUM = (BP_PAGE_DATA_SIZE - sizeof(page_count) - sizeof(allocated_pages)) * 8;
 
-  std::string to_string() const;
+  string to_string() const;
 };
 
 /**
@@ -88,34 +95,34 @@ public:
   /**
    * @brief 获取指定的页面
    *
-   * @param file_desc 文件描述符，也可以当做buffer pool文件的标识
+   * @param buffer_pool_id buffer Pool标识
    * @param page_num  页面号
    * @return Frame* 页帧指针
    */
-  Frame *get(int file_desc, PageNum page_num);
+  Frame *get(int buffer_pool_id, PageNum page_num);
 
   /**
    * @brief 列出所有指定文件的页面
    *
-   * @param file_desc 文件描述符
-   * @return std::list<Frame *> 页帧列表
+   * @param buffer_pool_id buffer Pool标识
+   * @return list<Frame *> 页帧列表
    */
-  std::list<Frame *> find_list(int file_desc);
+  list<Frame *> find_list(int buffer_pool_id);
 
   /**
    * @brief 分配一个新的页面
    *
-   * @param file_desc 文件描述符
+   * @param buffer_pool_id buffer Pool标识
    * @param page_num 页面编号
    * @return Frame* 页帧指针
    */
-  Frame *alloc(int file_desc, PageNum page_num);
+  Frame *alloc(int buffer_pool_id, PageNum page_num);
 
   /**
-   * 尽管frame中已经包含了file_desc和page_num，但是依然要求
+   * 尽管frame中已经包含了buffer_pool_id和page_num，但是依然要求
    * 传入，因为frame可能忘记初始化或者没有初始化
    */
-  RC free(int file_desc, PageNum page_num, Frame *frame);
+  RC free(int buffer_pool_id, PageNum page_num, Frame *frame);
 
   /**
    * 如果不能从空闲链表中分配新的页面，就使用这个接口，
@@ -124,7 +131,7 @@ public:
    * @param purger 需要在释放frame之前，对页面做些什么操作。当前是刷新脏数据到磁盘
    * @return 返回本次清理了多少个页面
    */
-  int purge_frames(int count, std::function<RC(Frame *frame)> purger);
+  int purge_frames(int count, function<RC(Frame *frame)> purger);
 
   size_t frame_num() const { return frames_.count(); }
 
@@ -147,7 +154,7 @@ private:
   using FrameLruCache  = common::LruCache<FrameId, Frame *, BPFrameIdHasher>;
   using FrameAllocator = common::MemPoolSimple<Frame>;
 
-  std::mutex     lock_;
+  mutex          lock_;
   FrameLruCache  frames_;
   FrameAllocator allocator_;
 };
@@ -175,17 +182,15 @@ private:
 /**
  * @brief BufferPool的实现
  * @ingroup BufferPool
+ * @details 一个文件被划分成多个相同大小的页面，并在需要访问的时候，会从文件读取到内存中。
+ * DiskBufferPool 就负责管理磁盘文件，以及负责管理页面在文件与内存中的交互，比如读取、写回。
  */
-class DiskBufferPool
+class DiskBufferPool final
 {
 public:
-  DiskBufferPool(BufferPoolManager &bp_manager, BPFrameManager &frame_manager);
+  DiskBufferPool(BufferPoolManager &bp_manager, BPFrameManager &frame_manager, DoubleWriteBuffer &dblwr_manager,
+      LogHandler &log_handler);
   ~DiskBufferPool();
-
-  /**
-   * 创建一个名称为指定文件名的分页文件
-   */
-  RC create_file(const char *file_name);
 
   /**
    * 根据文件名打开一个分页文件
@@ -203,8 +208,8 @@ public:
   RC get_this_page(PageNum page_num, Frame **frame);
 
   /**
-   * 在指定文件中分配一个新的页面，并将其放入缓冲区，返回页面句柄指针。
-   * 分配页面时，如果文件中有空闲页，就直接分配一个空闲页；
+   * @brief 在指定文件中分配一个新的页面，并将其放入缓冲区，返回页面句柄指针。
+   * @details 分配页面时，如果文件中有空闲页，就直接分配一个空闲页；
    * 如果文件中没有空闲页，则扩展文件规模来增加新的空闲页。
    */
   RC allocate_page(Frame **frame);
@@ -241,12 +246,12 @@ public:
   int file_desc() const;
 
   /**
-   * 如果页面是脏的，就将数据刷新到磁盘
+   * 如果页面是脏的，就将数据刷新到double write buffer
    */
   RC flush_page(Frame &frame);
 
   /**
-   * 刷新所有页面到磁盘，即使pin count不是0
+   * 刷新所有页面到double write buffer，即使pin count不是0
    */
   RC flush_all_pages();
 
@@ -254,6 +259,19 @@ public:
    * 回放日志时处理page0中已被认定为不存在的page
    */
   RC recover_page(PageNum page_num);
+
+  /**
+   * 刷新页面到磁盘
+   */
+  RC write_page(PageNum page_num, Page &page);
+
+  RC redo_allocate_page(LSN lsn, PageNum page_num);
+  RC redo_deallocate_page(LSN lsn, PageNum page_num);
+
+public:
+  int32_t id() const { return buffer_pool_id_; }
+
+  const char *filename() const { return file_name_.c_str(); }
 
 protected:
   RC allocate_frame(PageNum page_num, Frame **buf);
@@ -275,16 +293,22 @@ protected:
   RC flush_page_internal(Frame &frame);
 
 private:
-  BufferPoolManager &bp_manager_;
-  BPFrameManager    &frame_manager_;
+  BufferPoolManager   &bp_manager_;     /// BufferPool 管理器
+  BPFrameManager      &frame_manager_;  /// Frame 管理器
+  DoubleWriteBuffer   &dblwr_manager_;  /// Double Write Buffer 管理器
+  BufferPoolLogHandler log_handler_;    /// BufferPool 日志处理器
 
-  std::string       file_name_;
-  int               file_desc_   = -1;
-  Frame            *hdr_frame_   = nullptr;
-  BPFileHeader     *file_header_ = nullptr;
-  std::set<PageNum> disposed_pages_;
+  int file_desc_ = -1;  /// 文件描述符
+  /// 由于在最开始打开文件时，没有正确的buffer pool id不能加载header frame，所以单独从文件中读取此标识
+  int32_t       buffer_pool_id_ = -1;
+  Frame        *hdr_frame_      = nullptr;  /// 文件头页面
+  BPFileHeader *file_header_    = nullptr;  /// 文件头
+  set<PageNum>  disposed_pages_;            /// 已经释放的页面
+
+  string file_name_;  /// 文件名
 
   common::Mutex lock_;
+  common::Mutex wr_lock_;
 
 private:
   friend class BufferPoolIterator;
@@ -294,26 +318,38 @@ private:
  * @brief BufferPool的管理类
  * @ingroup BufferPool
  */
-class BufferPoolManager
+class BufferPoolManager final
 {
 public:
   BufferPoolManager(int memory_size = 0);
   ~BufferPoolManager();
 
+  RC init(unique_ptr<DoubleWriteBuffer> dblwr_buffer);
+
   RC create_file(const char *file_name);
-  RC open_file(const char *file_name, DiskBufferPool *&bp);
+  RC open_file(LogHandler &log_handler, const char *file_name, DiskBufferPool *&bp);
   RC close_file(const char *file_name);
 
   RC flush_page(Frame &frame);
 
-public:
-  static void               set_instance(BufferPoolManager *bpm);  // TODO 优化全局变量的表示方法
-  static BufferPoolManager &instance();
+  BPFrameManager    &get_frame_manager() { return frame_manager_; }
+  DoubleWriteBuffer *get_dblwr_buffer() { return dblwr_buffer_.get(); }
+
+  /**
+   * @brief 根据ID获取对应的BufferPool对象
+   * @details 在做redo时，需要根据ID获取对应的BufferPool对象，然后让bufferPool对象自己做redo
+   * @param id buffer pool id
+   * @param bp buffer pool 对象
+   */
+  RC get_buffer_pool(int32_t id, DiskBufferPool *&bp);
 
 private:
   BPFrameManager frame_manager_{"BufPool"};
 
-  common::Mutex                                     lock_;
-  std::unordered_map<std::string, DiskBufferPool *> buffer_pools_;
-  std::unordered_map<int, DiskBufferPool *>         fd_buffer_pools_;
+  unique_ptr<DoubleWriteBuffer> dblwr_buffer_;
+
+  common::Mutex                            lock_;
+  unordered_map<string, DiskBufferPool *>  buffer_pools_;
+  unordered_map<int32_t, DiskBufferPool *> id_to_buffer_pools_;
+  atomic<int32_t>                          next_buffer_pool_id_{1};  // 系统启动时，会打开所有的表，这样就可以知道当前系统最大的ID是多少了
 };
